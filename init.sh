@@ -21,15 +21,15 @@ fi
 if [[ "$OS" = 'debian' ]]; then
   apt update
   apt -y install apache2 git-core expect curl git unzip
-  git clone https://github.com/Subely/subely.com.git /var/www/$hostname.com
-  git clone https://github.com/Subely/api.subely.com.git /var/www/api.$hostname.com
-  sudo chown -R $USER:$USER /var/www/$hostname.com
-  sudo chown -R $USER:$USER /var/www/api.$hostname.com
+  git clone https://github.com/Subely/subely.com.git /var/www/$hostname
+  git clone https://github.com/Subely/api.subely.com.git /var/www/api.$hostname
+  sudo chown -R $USER:$USER /var/www/$hostname
+  sudo chown -R $USER:$USER /var/www/api.$hostname
   sudo chmod -R 755 /var/www
-  sudo cp ./config/$hostname.com.conf /etc/apache2/sites-available/$hostname.com.conf
-  sudo cp ./config/api.$hostname.com.conf /etc/apache2/sites-available/api.$hostname.com.conf
-  sudo a2ensite $hostname.com.conf
-  sudo a2ensite api.$hostname.com.conf
+  sed -e "s/\${host}/$hostname/" ./config/subely.com.conf |tee /etc/apache2/sites-available/$hostname.conf
+  sed -e "s/\${host}/$hostname/" ./config/api.subely.com.conf |tee /etc/apache2/sites-available/api.$hostname.conf
+  sudo a2ensite $hostname.conf
+  sudo a2ensite api.$hostname.conf
   sudo service apache2 restart
 
   # Install MySQL Server in a Non-Interactive mode. Default root password will be "root"
@@ -55,13 +55,13 @@ if [[ "$OS" = 'debian' ]]; then
   # install php
   sudo apt -y install php libapache2-mod-php php-mysql php-cli php-mbstring
   rm -rf /etc/apache2/mods-enabled/dir.conf
-  sudo cp ./config/dir.conf
+  sudo cp ./config/dir.conf /etc/apache2/mods-enabled/dir.conf
 
   # configure apache with the changes
   sudo systemctl restart apache2
 
   # configure .env file
-  sed -e "s/\${db_name}/restapi/" -e "s/\${db_user}/root/" -e "s/\${db_passwd}/$MYSQLPASSWORD/" .env.example |tee .env
+  sed -e "s/\${db_name}/restapi/" -e "s/\${db_user}/root/" -e "s/\${db_passwd}/$MYSQLPASSWORD/" /var/www/api.$hostname/.env.example |tee /var/www/api.$hostname/.env
 
   # composer install
   curl -sS https://getcomposer.org/installer -o composer-setup.php
