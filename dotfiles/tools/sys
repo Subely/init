@@ -1,0 +1,414 @@
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:          FastCGI
+# Required-Start:    networking
+# Required-Stop:     networking
+# Default-Start:     2 3 4 5
+# Default-Stop:      S 0 1 6
+# Short-Description: Start FastCGI servers.
+# Description:       Manage runit services or FastCGI servers with lighttpd's spawn-fcgi and multiwatch binaries.
+### END INIT INFO
+
+# services with runit
+# Author:  Yann Autissier <aya AT sys DOT ht>.
+
+# set -x
+
+PATH=/dns/tm/sys/usr/local/bin:/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+DESC="Services" 
+
+# Configuration file. List services to be lauched 
+SERVICE_CONF="/etc/service.conf" 
+SERVICE_CONF_DIR="/etc/service.d" 
+SERVICE_PATH="/etc/sv" 
+SERVICE_LINK="/etc/service" 
+RUNDIR="/var/run"
+LOGDIR="/var/log"
+ETC_CHMOD="0755"
+RUN_CHMOD="0755"
+LOG_CHMOD="2750"
+LOG_USER="log"
+LOG_GROUP="log"
+LOG_HOST="$(host -t A log| awk '{print $4}')"
+REMOTE_DIR="/dns/tm/sys"
+REMOTE_LOG="${REMOTE_DIR}/var/log/socklog/remote/config"
+SPAWNFCGI="/usr/bin/spawn-fcgi"
+MULTIWATCH="/usr/bin/multiwatch"
+LOG_FILESIZE="1048576"
+LOG_MAXFILES="16"
+DOCKER_RUN="/usr/bin/docker run"
+DOCKER_OPTIONS="-t --rm=true -v /dns:/dns"
+DOCKER_STOP="/usr/local/bin/docker-stop"
+DOCKER_REGISTRY="registry:5000"
+DOCKER_RETRY="60"
+DOCKER_MEMORY="128m"
+
+[ "$LOG_HOST" = "found:" ] && LOG_HOST=""
+
+# Configuration file in SERVICE_CONF_DIR are specified per hostname or per ip
+HOSTNAME="$(/bin/hostname)"
+[ -f "${SERVICE_CONF_DIR}/${HOSTNAME/-*/}" ] && [ "${HOSTNAME/-*/}" != "${HOSTNAME}" ] && SERVICE_CONF="${SERVICE_CONF} ${SERVICE_CONF_DIR}/${HOSTNAME/-*/}"
+[ -f "${SERVICE_CONF_DIR}/${HOSTNAME}" ] && SERVICE_CONF="${SERVICE_CONF} ${SERVICE_CONF_DIR}/${HOSTNAME}"
+[ -d "${SERVICE_CONF_DIR}/${HOSTNAME/-*/}" ] && [ "${HOSTNAME/-*/}" != "${HOSTNAME}" ] && SERVICE_CONF="${SERVICE_CONF} ${SERVICE_CONF_DIR}/${HOSTNAME/-*/}/*"
+[ -d "${SERVICE_CONF_DIR}/${HOSTNAME}" ] && SERVICE_CONF="${SERVICE_CONF} ${SERVICE_CONF_DIR}/${HOSTNAME}/*"
+
+ADDRESSES="$(ifconfig  |awk '$0 ~ /inet6? add?r/'| sed 's/inet6\? add\?r: \?\([a-f0-9\.\:]*\).*$/\1/')"
+for ADDRESS in $ADDRESSES; do
+  [ -f "${SERVICE_CONF_DIR}/${ADDRESS}" ] && SERVICE_CONF="${SERVICE_CONF} ${SERVICE_CONF_DIR}/${ADDRESS}"
+  [ -d "${SERVICE_CONF_DIR}/${ADDRESS}" ] && SERVICE_CONF="${SERVICE_CONF} ${SERVICE_CONF_DIR}/${ADDRESS}/*"
+done
+
+# Tell runit to start services.
+start()
+{
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check start || continue
+        echo -n " ${service}" 
+        [ -x ${SERVICE_PATH}/${service}/run ] && [ -d ${RUNDIR}/${service} ] || ( echo -n " (config"; config ${service}; echo -n ")"; )
+	sv start ${service} > /dev/null
+    done
+}
+
+# Tell runit to stop services.
+stop() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check stop || continue
+        echo -n " ${service}" 
+        sv stop ${service} > /dev/null
+    done
+}
+
+# Force runit to stop services.
+force-stop() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check force-stop || continue
+        sv kill ${service}
+    done
+}
+
+# update()
+# Create runit services configurations.
+config() {
+    [ -n "$1" ] && [ "$1" = "init" ] && init=1 && shift
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check config || continue
+        echo -n " ${service}" 
+        [ -d ${SERVICE_PATH}/${service} ] || mkdir -p ${SERVICE_PATH}/${service} && chmod ${ETC_CHMOD} ${SERVICE_PATH}/${service}
+        [ -d ${SERVICE_PATH}/${service}/log ] || mkdir -p ${SERVICE_PATH}/${service}/log && chmod ${ETC_CHMOD} ${SERVICE_PATH}/${service}/log
+        [ -d ${RUNDIR}/${service} ] || mkdir -p ${RUNDIR}/${service} && chmod ${RUN_CHMOD} ${RUNDIR}/${service}
+        [ -d ${RUNDIR}/${service}/log ] || mkdir -p ${RUNDIR}/${service}/log && chmod ${RUN_CHMOD} ${RUNDIR}/${service}/log
+        [ -h ${SERVICE_PATH}/${service}/supervise ] || ln -s ${RUNDIR}/${service} ${SERVICE_PATH}/${service}/supervise 
+        [ -d ${LOGDIR}/${service} ] || mkdir -p "${LOGDIR}/${service}" && chmod ${LOG_CHMOD} "${LOGDIR}/${service}" && chown ${LOG_USER}:${LOG_GROUP} "${LOGDIR}/${service}"
+        # pour eviter que plusieurs serveurs ecrivent dans le mm fichier au boot,
+        # si les fichiers de configuration existent deja,
+        # on ne les recree pas au demarrage, on recree uniquement les liens.
+        # 20150203: le repertoire /etc/sv est local a chaque VM, on peut forcer la creation des fichiers de conf a chaque reboot
+#        if [ ${init:-0} -eq 0 -o ! -f ${SERVICE_PATH}/${service}/run ]; then
+            echo -e "s${LOG_FILESIZE}\nn${LOG_MAXFILES}" > "${LOGDIR}/${service}/config" 
+            [ "${log}" = "remote" -o "${log// /}" = "local,remote" ] && [ -d ${LOGDIR}/${service}/remote ] || mkdir -p "${LOGDIR}/${service}/remote" && chmod ${LOG_CHMOD} "${LOGDIR}/${service}/remote" && chown ${LOG_USER}:${LOG_GROUP} "${LOGDIR}/${service}/remote"
+            # [ "${log}" = "local" ] && rm -rf ${LOGDIR}/${service}/remote
+            [ -d ${LOGDIR}/${service}/remote ] && remote="${LOGDIR}/${service}/remote" && [ -h ${LOGDIR}/${service}/remote/config ] || [ "${log}" = "local" ] || ln -s ${REMOTE_LOG} ${LOGDIR}/${service}/remote/config
+            [ -h ${SERVICE_PATH}/${service}/log/supervise ] || ln -s ${RUNDIR}/${service}/log ${SERVICE_PATH}/${service}/log/supervise 
+            [ -n "${bin}" ] && echo -e "#!/bin/bash\nexec 2>&1" > ${SERVICE_PATH}/${service}/run
+            [ "${type}" = "docker" ] && (
+                docker=${service%-*}
+                service_tmp_start_file="${TMPDIR}/.sv_started.${service}"
+                [ -n "${port}" ] && echo -e "#!/bin/bash
+exec 2>&1
+ulimit -n 65536
+ulimit -l 65536
+trap '${DOCKER_STOP} ${port%%:*}' 0
+trap 'exit 2' 1 2 3 15
+date_started=\$(date +%s 2>/dev/null)
+while date_current=\$(date +%s 2>/dev/null); do
+    ${DOCKER_RUN} ${DOCKER_OPTIONS} -m ${memory} -p ${port} ${DOCKER_REGISTRY}/${docker,,} & wait
+    [ \$((\${date_current:-0} - \${date_started:-0})) -gt ${retry:-0} ] && ( /usr/bin/sv stop ${service}; /usr/local/bin/sys logs ${service} |mail -s '[AS/APPS] ${service} stopped on $(hostname) after ${retry} seconds' hostmaster+$(hostname)@anotherservice.com )
+done" > ${SERVICE_PATH}/${service}/run
+            )
+            [ "${type}" = "fcgi" ] && (
+                [ -n "${sock}" ] && echo -e "exec ${SPAWNFCGI} -n -s ${sock} -u ${uid} -g ${gid} -M 0666 -- ${MULTIWATCH} -f ${fork} -- ${bin} ${arg}" >> ${SERVICE_PATH}/${service}/run && continue
+                [ ${ipv4} = "host" ] && [ -n "${host}" ] && ipv4=$(awk '$2 ~ /'${host}'/ {print $1}' /etc/hosts)
+                [ "${ipv4}" = "all" ] && ipv4="0.0.0.0"
+                [ "${ipv6}" = "all" ] && ipv6="::0"
+                [ -n "${ipv4}" ] && echo -e "exec ${SPAWNFCGI} -n -a ${ipv4} -p ${port} -u ${uid} -g ${gid} -M 0666 -- ${MULTIWATCH} -f ${fork} -- ${bin} ${arg}" >> ${SERVICE_PATH}/${service}/run && continue
+                [ -n "${ipv6}" ] && echo -e "exec ${SPAWNFCGI} -n -a ${ipv6} -p ${port} -u ${uid} -g ${gid} -M 0666 -- ${MULTIWATCH} -f ${fork} -- ${bin} ${arg}" >> ${SERVICE_PATH}/${service}/run
+            )
+            [ "${type}" = "logging" ] && [ -n "${path}" ] && remote="${path}"
+            [ -z "$type" -o "$type" != "fcgi" ] && [ -n "${bin}" ] && echo -e "${bin} ${arg}" >> ${SERVICE_PATH}/${service}/run
+            chmod ${RUN_CHMOD} ${SERVICE_PATH}/${service}/run
+            echo -e "#!/bin/bash" > ${SERVICE_PATH}/${service}/log/run
+            echo -e "exec chpst -u${LOG_USER} svlogd -tt ${LOGDIR}/${service} ${remote}" >> ${SERVICE_PATH}/${service}/log/run
+            chmod ${RUN_CHMOD} ${SERVICE_PATH}/${service}/log/run
+#        fi
+        [ -f ${SERVICE_LINK}/${service} ] || [ -d ${SERVICE_LINK}/${service} ] && rm -rf ${SERVICE_LINK}/${service}
+        [ -h ${SERVICE_LINK}/${service} ] || ln -s ${SERVICE_PATH}/${service} ${SERVICE_LINK}/${service}
+    done
+}
+
+# Purge runit services configurations.
+purge() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check purge || continue
+        echo -n " ${service}"
+        [ -d ${SERVICE_LINK}/${service} -o -h ${SERVICE_LINK}/${service} ] && rm -rf ${SERVICE_LINK}/${service}
+        [ -d ${RUNDIR}/${service} ] && rm -rf ${RUNDIR}/${service}
+        [ ${type} != 'logging' ] && [ -d ${LOGDIR}/${service} ] && rm -rf ${LOGDIR}/${service}
+    done
+}
+
+# List runit services.
+list() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check list || continue
+        echo "${service}"
+    done
+}
+
+# Query runit services status.
+status() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check status || continue
+        sv status ${service} |awk '{print $2" "$1}'|sed 's/:$//'
+    done
+}
+
+# Query runit services stats.
+stats() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    echo "pid   ppid cpu  ram   virtual service"
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check stats || continue
+        pid="$(cat ${RUNDIR}/${service}/pid)"
+        # [ ${type} = "docker" ] && pid="$(get-docker-pid ${service})"
+        [ ${type} = "docker" ] && pid="$(docker-pid ${port%:*})"
+        echo $(pidtreestats $pid) ${service}
+    done
+}
+
+# Query runit logs.
+logs() {
+    [ -n "$1" ] && list="$@" || list=$(get-conf "${SERVICE_CONF}")
+    for service in $list
+    do
+        reset
+        eval $(get-conf "${SERVICE_CONF}" ${service})
+        check logs || continue
+        # log="${LOGDIR}/${service}/current"
+        tail -n 30 ${LOGDIR}/${service}/current
+    done
+}
+
+# Check if we should skip services
+check() {
+    skip=0
+    # shift 1 arg if we get 'sys init clean' in order to pass next line with $2 set to next arg
+    [ "$1" = 'init' -a "$2" = 'clean' ] && shift
+    # check if input parameters contains a valid service
+    [ -n "$2" ] && skip=1 && shift && for service in $@; do
+        [ "${service}" = "$(get-conf "${SERVICE_CONF}"| grep ${service/\/*} 2>/dev/null)" ] && skip=0 || return $skip
+    done
+    for hostname in $host; do
+        [ "${hostname}" = "${HOSTNAME}" ] || [ "${hostname}" = "${HOSTNAME/-*/}" ] && skip=0 && break || skip=1
+    done
+    [ -n "${ipv4}" -a -n "${port}" ] || [ -n "${ipv6}" -a -n "${port}" ] || [ -n "${sock}" ] || [ "$type" != "fcgi" ] || skip=1
+    [ -n "${bin}" -a -n "${uid}" -a -n "${gid}" ] || [ "$type" != "fcgi" ] || skip=1
+    # stats command works only on running apps
+    [ "$1" = "stats" ] && [ -n "$service" ] && sv status ${service} | awk '$1 !~ /run/ {print "norunning"}'| grep 'norunning' >/dev/null 2>&1 && skip=1
+    # restart daemon services only whith --daemon option
+    [ ! $daemon ] && [ "${type}" = 'daemon' ] && [ "$1" = "start" -o "$1" = "stop" -o "$1" = "force-stop" -o "$1" = "purge" ] && skip=1
+    # restart logging services only whith --log option
+    [ ! $logging ] && [ "${type}" = 'logging' ] && [ "$1" = "start" -o "$1" = "stop" -o "$1" = "force-stop" -o "$1" = "purge" ] && skip=1
+    return $skip
+}
+
+# Empty variables
+reset() {
+    host=""; ipv4=""; ipv6=""; port=""; uid=""; gid=""; sock=""; arg=""; bin=""; fork=""; path=""; type=""; log=""; pids=""; retry=${DOCKER_RETRY}; memory=${DOCKER_MEMORY}
+}
+
+# initial config at boot
+init() {
+    # configure hostname
+    address=$(ifconfig eth0 |awk '$0 ~ /inet6? add?r/'| sed 's/inet6\? add\?r: \?\([a-f0-9\.\:]*\).*$/\1/'| head -1)
+    hostname=$(getent hosts $address|awk '{print $3}')
+    [ "${hostname/-*}" = "${HOSTNAME}" ] && hostname "${hostname/.*}"
+    # check /etc specific configuration for this hostname 
+    for link in /etc/*; do [ -h "$link" ] && [ -r "${REMOTE_DIR}/${link}+${hostname/-*}" ] && rm $link && ln -s ${REMOTE_DIR}/${link}+${hostname/-*} $link; done
+    for link in /etc/*; do [ -h "$link" ] && [ -r "${REMOTE_DIR}/${link}+${hostname/.*}" ] && rm $link && ln -s ${REMOTE_DIR}/${link}+${hostname/.*} $link; done
+    for file in /etc/init.d/*; do [ -f "${file}" ] && [ -r "${REMOTE_DIR}/${file}" ] && cp ${REMOTE_DIR}/${file} ${file}; done
+    for file in /etc/init/*; do [ -f "${file}" ] && [ -r "${REMOTE_DIR}/${file}" ] && cp ${REMOTE_DIR}/${file} ${file}; done
+    cp ${REMOTE_DIR}/etc/rc.local /etc/
+    # remove all services
+    [ -n "$1" ] && [ "$1" = "clean" ] && shift && rm ${SERVICE_LINK}/* >/dev/null 2>&1
+    # config all services
+    config init $@
+    echo "." 
+    # local specific config
+    [ -x /usr/local/bin/init ] && /usr/local/bin/init $hostname
+    return 0
+}
+
+# Print usage
+usage() {
+    echo "Usage: $0 [-dlh] [start|stop|status|list|logs|restart|force-stop|force-restart|config|purge|init] [service1 [service2 [...]]]"
+}
+
+# Print help
+help() {
+    usage
+    echo
+    echo "Manage runit services."
+    echo
+    echo -e "  -h|--help\t display this help and exit"
+    echo -e "  -d|--daemon\t restart daemon services too"
+    echo -e "  -l|--log\t restart logging services too"
+    echo
+}
+
+# Check options
+while [ "${1:0:1}" = "-" ]; do
+    case "$1" in
+        "-l"|"--logging")
+            logging=1
+            ;;
+        "-d"|"--daemon")
+            daemon=1
+            ;;
+        "-h"|"--help")
+            help
+            exit 0
+            ;;
+    esac
+    shift
+done
+
+# Check if we have valid services
+# check services $@ && shift && echo "No service found : $@" && exit 1
+check $@ || { shift && echo "No service found : $@" && exit 2; }
+
+case "$1" in
+    start)
+        shift
+        echo -n " * Starting $DESC:" 
+        start "$@"
+        echo "." 
+        ;;
+
+    stop)
+        shift
+        echo -n " * Stopping $DESC:" 
+        stop "$@"
+        echo "." 
+        ;;
+
+    stats)
+        shift
+        echo "$DESC stats:" 
+        stats "$@"
+        ;;
+
+    status)
+        shift
+        echo "$DESC status:" 
+        status "$@"
+        ;;
+
+    list)
+        shift
+        echo "$DESC:" 
+        list "$@"
+        ;;
+
+    restart)
+        shift
+        echo -n " * Stopping $DESC:" 
+        stop "$@"
+        echo "." 
+        sleep 1
+        echo -n " * Starting $DESC:" 
+        start "$@"
+        echo "." 
+        ;;
+
+    force-stop)
+        shift
+        echo " * Killing $DESC:" 
+        force-stop "$@"
+        echo "." 
+        ;;
+
+    force-restart)
+        shift
+        echo " * Killing $DESC:" 
+        force-stop "$@"
+        echo "." 
+        sleep 1
+        echo -n " * Starting $DESC:" 
+        start "$@"
+        echo "." 
+        ;;
+
+    config)
+        shift
+        echo -n " * Configuring $DESC:" 
+        config "$@"
+        echo "." 
+        ;;
+
+    purge)
+        shift
+        echo -n " * Purging $DESC:" 
+        purge "$@"
+        echo "." 
+        ;;
+
+    logs)
+        shift
+        logs "$@"
+        ;;
+
+    init)
+        shift
+        echo -n " * Initializing $DESC:" 
+        init "$@"
+        # echo "." 
+        ;;
+
+    *)
+        usage >&2
+        exit 3
+        ;;
+esac
+
+exit 0
