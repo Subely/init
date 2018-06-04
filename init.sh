@@ -2,6 +2,22 @@ LOGFILE=install.log
 
 hostname=$1
 
+if [[ -e /etc/debian_version ]]; then
+	OS=debian
+	GROUPNAME=nogroup
+	RCLOCAL='/etc/rc.local'
+elif [[ -e /etc/centos-release || -e /etc/redhat-release ]]; then
+	OS=centos
+	GROUPNAME=nobody
+	RCLOCAL='/etc/rc.d/rc.local'
+elif [[ `uname` == "Darwin" ]]; then
+	OS=macos
+	GROUPNAME=nogroup
+else
+	echo "Looks like you aren't running this installer on Debian, Ubuntu or CentOS"
+	exit
+fi
+
 if [[ "$OS" = 'debian' ]]; then
   apt update
   apt -y install apache2 git-core expect curl git unzip
