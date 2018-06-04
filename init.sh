@@ -1,17 +1,19 @@
 LOGFILE=install.log
 
+hostname=$1
+
 if [[ "$OS" = 'debian' ]]; then
   apt update
   apt -y install apache2 git-core expect curl git unzip
-  git clone https://github.com/Subely/subely.com.git /var/www/subely.com
-  git clone https://github.com/Subely/api.subely.com.git /var/www/api.subely.com
-  sudo chown -R $USER:$USER /var/www/subely.com
-  sudo chown -R $USER:$USER /var/www/api.subely.com
+  git clone https://github.com/Subely/subely.com.git /var/www/$hostname.com
+  git clone https://github.com/Subely/api.subely.com.git /var/www/api.$hostname.com
+  sudo chown -R $USER:$USER /var/www/$hostname.com
+  sudo chown -R $USER:$USER /var/www/api.$hostname.com
   sudo chmod -R 755 /var/www
-  sudo cp ./config/subely.com.conf /etc/apache2/sites-available/subely.com.conf
-  sudo cp ./config/api.subely.com.conf /etc/apache2/sites-available/api.subely.com.conf
-  sudo a2ensite subely.com.conf
-  sudo a2ensite api.subely.com.conf
+  sudo cp ./config/$hostname.com.conf /etc/apache2/sites-available/$hostname.com.conf
+  sudo cp ./config/api.$hostname.com.conf /etc/apache2/sites-available/api.$hostname.com.conf
+  sudo a2ensite $hostname.com.conf
+  sudo a2ensite api.$hostname.com.conf
   sudo service apache2 restart
 
   # Install MySQL Server in a Non-Interactive mode. Default root password will be "root"

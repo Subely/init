@@ -6,4 +6,4 @@ This script will setup the api and front-end in addition to installing mysql, ap
 ### Installation
 Run the script and follow the assistant:
 
-`wget https://git.io/vh8pj -O init.sh && bash init.sh`
+`wget https://git.io/vh8pj -O init.sh && bash init.sh <hostname>`
