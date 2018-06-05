@@ -2,6 +2,14 @@ LOGFILE=install.log
 
 hostname=$1
 
+if [[ $hostname == *'.'* ]]; then
+	host $hostname > /dev/null 2>&1
+	echo "is valid"
+	else
+		echo "hostname is not valid"
+		exit
+fi
+
 if [[ -e /etc/debian_version ]]; then
 	OS=debian
 	GROUPNAME=nogroup
