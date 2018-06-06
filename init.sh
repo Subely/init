@@ -42,10 +42,6 @@ if [[ "$OS" = 'debian' ]]; then
   sudo a2ensite api.$hostname.conf
   sudo service apache2 restart
 
-  # Install MySQL Server in a Non-Interactive mode. Default root password will be "root"
-  // Not required in actual script
-  MYSQL_ROOT_PASSWORD=abcd1234
-
   #
   #Installing MySQL 5.7 which is available in default repo for Ubuntu 16.06
   #
@@ -60,7 +56,7 @@ if [[ "$OS" = 'debian' ]]; then
 
   mysql -u root -proot -e "use mysql; UPDATE user SET authentication_string=PASSWORD('$MYSQLPASSWORD') WHERE User='root'; flush privileges;" >> $LOGFILE 2>&1
 
-  checkerror $?
+  # checkerror $?
 
   # install php
   sudo apt -y install php libapache2-mod-php php-mysql php-cli php-mbstring php-curl php7.2-xml
