@@ -1,3 +1,5 @@
+#!/bin/bash
+
 LOGFILE=install.log
 
 hostname=$1
@@ -61,21 +63,32 @@ if [[ "$OS" = 'debian' ]]; then
   checkerror $?
 
   # install php
-  sudo apt -y install php libapache2-mod-php php-mysql php-cli php-mbstring
+  sudo apt -y install php libapache2-mod-php php-mysql php-cli php-mbstring php-curl php7.2-xml
   rm -rf /etc/apache2/mods-enabled/dir.conf
   sudo cp ./config/dir.conf /etc/apache2/mods-enabled/dir.conf
 
   # configure apache with the changes
   sudo systemctl restart apache2
 
+  mysql -u root -proot -e "use mysql; UPDATE user SET authentication_string=PASSWORD('$MYSQLPASSWORD') WHERE User='root'; flush privileges;" >> $LOGFILE 2>&1
+
+  mysql -u "root" "-p$MYSQLPASSWORD" <<MYSQL_SCRIPT
+CREATE DATABASE restapi;
+CREATE USER '$1'@'localhost' IDENTIFIED BY '$PASS';
+GRANT ALL PRIVILEGES ON $1.* TO '$1'@'localhost';
+FLUSH PRIVILEGES;
+MYSQL_SCRIPT
+
+
   # configure .env file
   sed -e "s/\${db_name}/restapi/" -e "s/\${db_user}/root/" -e "s/\${db_passwd}/$MYSQLPASSWORD/" /var/www/api.$hostname/.env.example |tee /var/www/api.$hostname/.env
 
   # composer install
   curl -sS https://getcomposer.org/installer -o composer-setup.php
-  php -r "if (hash_file('SHA384', 'composer-setup.php') === '669656bab3166a7aff8a7506b8cb2d1c292f042046c5a994c43155c0be6190fa0355160742ab2e1c88d40d5be660b410') { echo 'Installer verified'; } else { echo 'Installer corrupt'; unlink('composer-setup.php'); } echo PHP_EOL;"
+  php -r "if (hash_file('SHA384', 'composer-setup.php') === '544e09ee996cdf60ece3804abc52599c22b1f40f4323403c44d44fdfdd586475ca9813a858088ffbc1f233e9b180f061') { echo 'Installer verified'; } else { echo 'Installer corrupt'; unlink('composer-setup.php'); } echo PHP_EOL;"
   sudo php composer-setup.php --install-dir=/usr/local/bin --filename=composer
 
+  cd /var/www/api.$hostname
   composer install
   php artisan migrate
   php artisan db:seed
